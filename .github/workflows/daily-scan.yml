@@ -5,8 +5,12 @@ on:
     # 22:00 UTC weekdays — an hour after the US close (16:00 ET / 21:00 UTC).
     # GitHub's scheduler is best-effort and can run 5-30 minutes late when the
     # platform is busy. Fine for a daily page; not for anything time-critical.
-   - cron: "0 14-21 * * 1-5"
+    - cron: "0 22 * * 1-5"
   workflow_dispatch:        # lets you trigger it by hand from the Actions tab
+
+concurrency:
+  group: market-scan
+  cancel-in-progress: false
 
 permissions:
   contents: write           # to commit the updated page
@@ -39,4 +43,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add docs archive
           git commit -m "Scan $(date -u +%Y-%m-%d)" || echo "nothing to commit"
+          # Another run (or your own edit) may have moved main since checkout.
+          # Rebase onto it rather than failing the whole job on a rejected push.
+          git pull --rebase --autostash origin main || true
           git push

@@ -27,7 +27,24 @@ from datetime import datetime, timedelta, timezone
 import numpy as np
 import pandas as pd
 
-UNIVERSE = {
+# ---------------------------------------------------------------------
+# UNIVERSE
+#
+# "core"   ~57 hand-picked names across 10 sectors. Fast, readable.
+# "sp500"  the S&P 500. ~500 names, roughly 2 minutes.
+# "sp1500" S&P 500 + 400 midcap + 600 smallcap. ~1500 names, ~5 minutes.
+#
+# Bigger is not automatically better. The scan flags moves beyond a
+# threshold; widen the universe and the count of "unusual" names grows in
+# proportion, not the amount of signal. So the threshold auto-scales below
+# to keep the page roughly the same length whatever size you pick.
+# ---------------------------------------------------------------------
+
+UNIVERSE_MODE = "sp500"      # "core" | "sp500" | "sp1500"
+INCLUDE_CRYPTO = True
+SHOW_TOP = 15                # cards on the page, ranked by |z|
+
+CORE = {
     "Index":      ["SPY", "QQQ", "IWM", "DIA", "EFA", "EEM"],
     "Bonds/FX":   ["TLT", "IEF", "HYG", "LQD", "UUP", "FXE"],
     "Commodity":  ["GLD", "SLV", "USO", "DBC", "URA"],
@@ -40,6 +57,77 @@ UNIVERSE = {
     "Volatile":   ["COIN", "PLTR", "MARA", "GME", "RIVN", "SOFI"],
 }
 
+CRYPTO = ["BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "BNB-USD", "ADA-USD",
+          "DOGE-USD", "AVAX-USD", "DOT-USD", "LINK-USD", "MATIC-USD",
+          "LTC-USD", "UNI-USD", "ATOM-USD", "XLM-USD", "NEAR-USD",
+          "ICP-USD", "FIL-USD", "APT-USD", "ARB-USD"]
+
+WIKI = {
+    "sp500": ("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies", 0,
+              "Symbol", "GICS Sector"),
+    "sp400": ("https://en.wikipedia.org/wiki/List_of_S%26P_400_companies", 0,
+              "Symbol", "GICS Sector"),
+    "sp600": ("https://en.wikipedia.org/wiki/List_of_S%26P_600_companies", 0,
+              "Symbol", "GICS Sector"),
+}
+
+
+def fetch_index(key):
+    """Pull constituents from Wikipedia. Returns {ticker: sector}."""
+    url, table, sym_col, sec_col = WIKI[key]
+    try:
+        tables = pd.read_html(url)
+        for t in tables:
+            if sym_col in t.columns:
+                out = {}
+                for _, r in t.iterrows():
+                    sym = str(r[sym_col]).strip().upper().replace(".", "-")
+                    sec = str(r[sec_col]).strip() if sec_col in t.columns else "Other"
+                    if sym and sym != "NAN":
+                        out[sym] = sec
+                return out
+    except Exception as exc:
+        print("  ! could not fetch %s: %s" % (key, str(exc)[:70]), file=sys.stderr)
+    return {}
+
+
+def build_universe():
+    """Returns {sector: [tickers]} for the configured mode."""
+    if UNIVERSE_MODE == "core":
+        uni = {k: list(v) for k, v in CORE.items()}
+    else:
+        keys = ["sp500"] if UNIVERSE_MODE == "sp500" else ["sp500", "sp400", "sp600"]
+        merged = {}
+        for k in keys:
+            merged.update(fetch_index(k))
+        if not merged:
+            print("  ! index fetch failed, falling back to core list", file=sys.stderr)
+            merged = {t: s for s, ts in CORE.items() for t in ts}
+        uni = {}
+        for sym, sec in merged.items():
+            uni.setdefault(sec, []).append(sym)
+
+    if INCLUDE_CRYPTO:
+        uni["Crypto"] = list(CRYPTO)
+    return uni
+
+
+def auto_threshold(n):
+    """
+    Scale the 'unusual' bar with universe size so the page stays readable.
+
+    Flagging beyond 2 sigma catches ~5% of names by definition. That is 3
+    names out of 57 and 250 out of 5000 -- the same noise, just more of it.
+    """
+    if n <= 100:
+        return 2.0
+    if n <= 600:
+        return 2.5
+    if n <= 1600:
+        return 3.0
+    return 3.5
+
+
 VOL_WINDOW = 60
 Z_THRESHOLD = 2.0
 NEWS_FOR_TOP = 6
@@ -49,10 +137,25 @@ UA = "Mozilla/5.0 (compatible; market-scan/1.0)"
 def scan(universe, vol_window=VOL_WINDOW):
     import yfinance as yf
 
-    tickers = [t for g in universe.values() for t in g]
+    tickers = sorted({t for g in universe.values() for t in g})
     sector_of = {t: s for s, g in universe.items() for t in g}
-    data = yf.download(tickers, period="6mo", progress=False,
-                       auto_adjust=True, group_by="ticker", threads=True)
+    print("  scanning %d tickers" % len(tickers), file=sys.stderr)
+
+    # Chunked: one 1,500-ticker request will time out or get throttled.
+    frames = []
+    CHUNK = 150
+    for i in range(0, len(tickers), CHUNK):
+        part = tickers[i:i + CHUNK]
+        try:
+            d = yf.download(part, period="6mo", progress=False,
+                            auto_adjust=True, group_by="ticker", threads=True)
+            frames.append(d)
+        except Exception as exc:
+            print("  ! chunk %d failed: %s" % (i // CHUNK, str(exc)[:60]), file=sys.stderr)
+        time.sleep(1.0)
+    if not frames:
+        return pd.DataFrame()
+    data = pd.concat(frames, axis=1) if len(frames) > 1 else frames[0]
 
     rows = []
     for t in tickers:
@@ -165,7 +268,8 @@ def build_brief(df):
     df["abs_z"] = df["z"].abs()
     ordered = df.dropna(subset=["z"]).sort_values("abs_z", ascending=False)
     unusual = ordered[ordered["abs_z"] >= Z_THRESHOLD]
-    show = unusual if len(unusual) else ordered.head(5)
+    show = (unusual.head(SHOW_TOP) if len(unusual)
+             else ordered.head(5))
 
     L += ["## %s" % ("Unusual moves" if len(unusual)
                      else "Nothing crossed the threshold — closest were"), ""]
@@ -207,7 +311,8 @@ def build_html(df):
     d["abs_z"] = d["z"].abs()
     ordered = d.dropna(subset=["z"]).sort_values("abs_z", ascending=False)
     unusual = ordered[ordered["abs_z"] >= Z_THRESHOLD]
-    show = unusual if len(unusual) else ordered.head(6)
+    show = (unusual.head(SHOW_TOP) if len(unusual)
+            else ordered.head(6))
 
     adv = float((df["chg_%"] > 0).mean() * 100)
     sec = df.groupby("sector")["chg_%"].mean().sort_values()
@@ -325,7 +430,12 @@ into overtrading. Most days the right response is to read this and do nothing.
 
 
 def main():
-    df = scan(UNIVERSE)
+    global Z_THRESHOLD
+    universe = build_universe()
+    total = len({t for g in universe.values() for t in g})
+    Z_THRESHOLD = auto_threshold(total)
+    print("  universe %d names, threshold z=%.1f" % (total, Z_THRESHOLD), file=sys.stderr)
+    df = scan(universe)
     if df.empty:
         print("No data retrieved.", file=sys.stderr)
         return 1

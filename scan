@@ -199,6 +199,131 @@ def build_brief(df):
     return "\n".join(L)
 
 
+
+def build_html(df):
+    """Self-contained dashboard page. No frameworks, no external requests."""
+    now = datetime.now(timezone.utc)
+    d = df.copy()
+    d["abs_z"] = d["z"].abs()
+    ordered = d.dropna(subset=["z"]).sort_values("abs_z", ascending=False)
+    unusual = ordered[ordered["abs_z"] >= Z_THRESHOLD]
+    show = unusual if len(unusual) else ordered.head(6)
+
+    adv = float((df["chg_%"] > 0).mean() * 100)
+    sec = df.groupby("sector")["chg_%"].mean().sort_values()
+
+    def row(r):
+        col = "up" if r["chg_%"] > 0 else "dn"
+        news = news_for(r["ticker"], 2)
+        links = "".join(
+            '<a href="%s" target="_blank" rel="noreferrer">%s</a>'
+            % (i["link"], html.escape(i["title"][:95])) for i in news)
+        return ("""<div class="card">
+          <div class="hd">
+            <span class="tk">%s</span><span class="sec">%s</span>
+            <span class="chg %s">%+.2f%%</span>
+          </div>
+          <div class="mt">
+            <span><b>z %+.1f</b> vs its own normal</span>
+            <span>volume %sx</span><span>RSI %.0f</span>
+            <span>%.1f%% off 52w high</span>
+          </div>
+          <div class="news">%s</div>
+        </div>""" % (r["ticker"], r["sector"], col, r["chg_%"], r["z"],
+                     r["vol_x"] if r["vol_x"] else "-", r["rsi"], abs(r["vs_hi_%"]),
+                     links or '<span class="none">no recent headlines</span>'))
+
+    tone = ("Broad rally" if adv >= 80 else "Broad selloff" if adv <= 20 else "Mixed tape")
+    note = ("individual stock news matters less than the market move" if adv >= 80
+            else "names down today are mostly moving with the market" if adv <= 20
+            else "moves are more likely stock-specific than market-wide")
+
+    bars = "".join(
+        '<div class="sbar"><span>%s</span>'
+        '<div class="track"><div class="fill %s" style="width:%.0f%%"></div></div>'
+        '<b class="%s">%+.2f%%</b></div>'
+        % (name, "up" if val > 0 else "dn",
+           min(abs(val) / max(sec.abs().max(), 0.01) * 100, 100),
+           "up" if val > 0 else "dn", val)
+        for name, val in sec.items())
+
+    return """<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="refresh" content="1800">
+<title>Market scan</title><style>
+:root{--bg:#EDF0F3;--card:#fff;--ink:#141B26;--mut:#5C6878;--rule:#D2D9E0;
+--up:#2F6B4F;--dn:#A63D40;--ind:#2E3A87}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);
+font:15px/1.55 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif}
+.wrap{max-width:880px;margin:0 auto;padding:26px 18px 60px}
+.eyebrow{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11px;
+letter-spacing:.18em;color:var(--mut)}
+h1{font-size:26px;margin:8px 0 4px;letter-spacing:-.02em}
+.stamp{font-size:12px;color:var(--mut);margin-bottom:22px}
+h2{font-size:12px;text-transform:uppercase;letter-spacing:.09em;color:var(--mut);
+margin:28px 0 12px}
+.summary{background:var(--card);border:1px solid var(--rule);border-left:4px solid var(--ind);
+border-radius:4px;padding:18px 20px}
+.summary b{font-size:17px}
+.card{background:var(--card);border:1px solid var(--rule);border-radius:4px;
+padding:15px 18px;margin-bottom:10px}
+.hd{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.tk{font-family:ui-monospace,Menlo,monospace;font-weight:700;font-size:17px}
+.sec{font-size:12px;color:var(--mut)}
+.chg{margin-left:auto;font-family:ui-monospace,Menlo,monospace;font-weight:700;font-size:17px}
+.up{color:var(--up)}.dn{color:var(--dn)}
+.mt{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--mut);margin-top:7px;
+font-family:ui-monospace,Menlo,monospace}
+.news{margin-top:10px;padding-top:9px;border-top:1px solid var(--rule)}
+.news a{display:block;font-size:13px;color:var(--ind);text-decoration:none;padding:2px 0}
+.news a:hover{text-decoration:underline}
+.none{font-size:12px;color:var(--mut)}
+.sbar{display:flex;align-items:center;gap:10px;font-size:13px;margin-bottom:6px}
+.sbar span{width:88px;color:var(--mut);font-size:12px}
+.sbar b{width:62px;text-align:right;font-family:ui-monospace,Menlo,monospace;font-size:12px}
+.track{flex:1;height:16px;background:#E2E7ED;border-radius:2px;overflow:hidden}
+.fill{height:100%%}.fill.up{background:var(--up)}.fill.dn{background:var(--dn)}
+footer{margin-top:34px;padding-top:16px;border-top:1px solid var(--rule);
+font-size:12px;color:var(--mut);line-height:1.6}
+</style></head><body><div class="wrap">
+<div class="eyebrow">MARKET SCAN &middot; UPDATES ITSELF EACH WEEKDAY</div>
+<h1>%s</h1>
+<div class="stamp">Last run %s UTC &middot; %d names scanned</div>
+
+<div class="summary">
+  <b>%s</b> &mdash; %.0f%% of the universe advanced, so %s.
+  %s
+</div>
+
+<h2>%s</h2>
+%s
+
+<h2>Sectors</h2>
+%s
+
+<footer>
+Every move is divided by that name's <b>own</b> recent volatility, so a
+z-score of 3 means the same thing everywhere. A raw percentage does not.<br><br>
+This page reports what moved. It never says what to do about it, and there is
+no broker connection or order path anywhere in it. Something unusual happens
+every single day &mdash; treating each one as actionable is how a scanner turns
+into overtrading. Most days the right response is to read this and do nothing.
+</footer>
+</div></body></html>""" % (
+        now.strftime("%A %d %B %Y"),
+        now.strftime("%H:%M"),
+        len(df),
+        tone, adv, note,
+        ("%d name%s moved more than %.1f standard deviations from normal."
+         % (len(unusual), "" if len(unusual) == 1 else "s", Z_THRESHOLD))
+        if len(unusual) else
+        "No move exceeded %.1f standard deviations. A quiet day." % Z_THRESHOLD,
+        "Unusual moves" if len(unusual) else "Closest to unusual",
+        "".join(row(r) for _, r in show.iterrows()),
+        bars)
+
+
 def main():
     df = scan(UNIVERSE)
     if df.empty:
@@ -208,6 +333,10 @@ def main():
     brief = build_brief(df)
     with open("brief.md", "w", encoding="utf-8") as fh:
         fh.write(brief)
+
+    os.makedirs("docs", exist_ok=True)
+    with open("docs/index.html", "w", encoding="utf-8") as fh:
+        fh.write(build_html(df))
     df.to_csv("latest_scan.csv", index=False)
 
     # Headline for the issue title, so the email subject is useful on its own.
@@ -227,7 +356,7 @@ def main():
         fh.write(title)
 
     print(title)
-    print("Wrote brief.md (%d chars)" % len(brief))
+    print("Wrote brief.md and docs/index.html")
     return 0
 
 

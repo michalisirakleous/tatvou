@@ -1,0 +1,52 @@
+name: Daily market scan
+
+on:
+  schedule:
+    # 22:00 UTC on weekdays — after the US close (16:00 ET / 21:00 UTC),
+    # with an hour of slack. GitHub's scheduler is best-effort and can run
+    # late by 5-30 minutes when the platform is busy; that's fine here.
+    - cron: "0 22 * * 1-5"
+  workflow_dispatch:        # lets you trigger it by hand from the Actions tab
+
+permissions:
+  contents: write           # to commit the archived brief
+  issues: write             # to post the brief as an issue
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install --quiet pandas numpy yfinance tabulate
+
+      - name: Run the scan
+        run: python scan.py
+
+      - name: Post the brief as an issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create \
+            --title "$(cat title.txt)" \
+            --body-file brief.md \
+            --label "scan"
+
+      - name: Archive today's brief
+        run: |
+          mkdir -p archive
+          cp brief.md "archive/$(date -u +%Y-%m-%d).md"
+          cp latest_scan.csv archive/latest_scan.csv
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add archive
+          git commit -m "Scan $(date -u +%Y-%m-%d)" || echo "nothing to commit"
+          git push

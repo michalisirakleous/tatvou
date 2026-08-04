@@ -14,6 +14,7 @@ NO TRADING. It reports what moved. It never says what to do about it.
 """
 
 import html
+import io
 import math
 import os
 import re
@@ -57,10 +58,11 @@ CORE = {
     "Volatile":   ["COIN", "PLTR", "MARA", "GME", "RIVN", "SOFI"],
 }
 
+# MATIC became POL; UNI-USD and APT-USD no longer resolve on Yahoo.
 CRYPTO = ["BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "BNB-USD", "ADA-USD",
-          "DOGE-USD", "AVAX-USD", "DOT-USD", "LINK-USD", "MATIC-USD",
-          "LTC-USD", "UNI-USD", "ATOM-USD", "XLM-USD", "NEAR-USD",
-          "ICP-USD", "FIL-USD", "APT-USD", "ARB-USD"]
+          "DOGE-USD", "AVAX-USD", "DOT-USD", "LINK-USD", "POL-USD",
+          "LTC-USD", "ATOM-USD", "XLM-USD", "NEAR-USD", "ICP-USD",
+          "FIL-USD", "ARB-USD", "TRX-USD", "SHIB-USD"]
 
 WIKI = {
     "sp500": ("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies", 0,
@@ -76,7 +78,12 @@ def fetch_index(key):
     """Pull constituents from Wikipedia. Returns {ticker: sector}."""
     url, table, sym_col, sec_col = WIKI[key]
     try:
-        tables = pd.read_html(url)
+        # Wikipedia returns 403 to requests without a proper user-agent, and
+        # pandas.read_html sends none. So fetch it ourselves first.
+        req = urllib.request.Request(url, headers={"User-Agent": UA})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            page = r.read().decode("utf-8", "replace")
+        tables = pd.read_html(io.StringIO(page))
         for t in tables:
             if sym_col in t.columns:
                 out = {}
